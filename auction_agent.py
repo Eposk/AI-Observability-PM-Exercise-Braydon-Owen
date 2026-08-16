@@ -19,9 +19,10 @@ load_dotenv()
 # instrumented for telemetry). The agent itself still works fine either way.
 logging.getLogger("opentelemetry.exporter.otlp.proto.http.trace_exporter").setLevel(logging.ERROR)
 
+from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from traceloop.sdk import Traceloop
-from traceloop.sdk.decorators import workflow
+from traceloop.sdk.decorators import task, workflow
 
 from llm_explorer_processor import LLMExplorerSpanProcessor
 
@@ -116,6 +117,7 @@ TOOLS = [
 BUYERS_PREMIUM_RATE = 0.10
 
 
+@task(name="get_highest_valid_bid")
 def get_highest_valid_bid(item_id: str) -> dict:
     if item_id not in ITEMS:
         return {"error": f"Unknown item_id '{item_id}'. No such auction item exists."}
@@ -129,6 +131,7 @@ def get_highest_valid_bid(item_id: str) -> dict:
     return {"item_id": item_id, "highest_bid": top["amount"], "bidder_id": top["bidder_id"]}
 
 
+@task(name="check_reserve_met")
 def check_reserve_met(item_id: str, bid_amount: float) -> dict:
     if item_id not in ITEMS:
         return {"error": f"Unknown item_id '{item_id}'. No such auction item exists."}
@@ -142,6 +145,7 @@ def check_reserve_met(item_id: str, bid_amount: float) -> dict:
     }
 
 
+@task(name="generate_invoice")
 def generate_invoice(item_id: str, winning_bidder_id: str, bid_amount: float) -> dict:
     if item_id not in ITEMS:
         return {"error": f"Unknown item_id '{item_id}'. No such auction item exists."}
@@ -166,9 +170,22 @@ TOOL_FUNCTIONS = {
 
 
 @workflow(name="auction_agent_run")
-def run_agent(user_message: str, verbose: bool = True) -> dict:
-    """Runs the agent loop for a single user message. Returns the full transcript."""
-    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+def run_agent(
+    user_message: str,
+    verbose: bool = True,
+    api_key: str = None,
+    model: str = None,
+    timeout: float = None,
+    max_iterations: int = None,
+) -> dict:
+    """Runs the agent loop for a single user message. Returns the full transcript.
+
+    api_key/model/timeout/max_iterations let error_scenarios.py override normal
+    config to deliberately trigger auth, not-found, timeout, or budget errors.
+    """
+    client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"), timeout=timeout)
+    model = model or MODEL
+    max_iterations = max_iterations or MAX_ITERATIONS
 
     Traceloop.set_association_properties({"conversation_id": str(uuid.uuid4())})
 
@@ -178,9 +195,9 @@ def run_agent(user_message: str, verbose: bool = True) -> dict:
     if verbose:
         print(f"\n{'=' * 80}\nUSER: {user_message}\n{'=' * 80}")
 
-    for iteration in range(MAX_ITERATIONS):
+    for iteration in range(max_iterations):
         response = client.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=1024,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
@@ -234,6 +251,11 @@ def run_agent(user_message: str, verbose: bool = True) -> dict:
             })
 
         messages.append({"role": "user", "content": tool_results})
+    else:
+        transcript["incomplete"] = True
+        trace.get_current_span().set_attribute("agent.incomplete", True)
+        if verbose:
+            print(f"\n[WARNING] Hit max_iterations ({max_iterations}) without a final answer.")
 
     transcript["final_messages"] = messages
     return transcript

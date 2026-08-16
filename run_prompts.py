@@ -1,8 +1,7 @@
-"""Generates load on the auction agent by firing a set of test prompts.
-
-Covers: happy path, no bids, reserve not met, reserve exactly met,
-direct invoice request (skipping discovery), and an ambiguous item
-reference -- the scenarios called out as worth observing.
+"""Covers: happy path, no bids, reserve not met, reserve exactly met,
+direct invoice request (skipping discovery), an ambiguous item
+reference, a non-existent item, an incorrect premise,
+a question outside the scope of the agent, and a multi-stepped request
 """
 
 from auction_agent import run_agent
